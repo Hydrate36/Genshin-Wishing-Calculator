@@ -2,7 +2,7 @@
 name = "wish-tracker"
 version = "2.0.0"
 edition = "2021"
-description = "Genshin Wishing Calculator â€” pity and wish tracker"
+description = "Genshin Wishing Calculator — pity and wish tracker"
 
 [lib]
 name = "wish_lib"
@@ -26,6 +26,7 @@ dirs = "6"
 anyhow = "1"
 regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+serde_yaml = "0.9"
 
 [profile.release]
 opt-level = 3

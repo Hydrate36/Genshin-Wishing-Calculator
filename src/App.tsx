@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Active, ago, api, bannerImg, charImg, Five, itemImg, pct, Pool, POOL_NAME, until, View, weaponImg } from "./api";
+import { Active, ago, api, Five, Game, Item, pct, Pool, until, View, WORDS } from "./api";
 
 type Toast = { text: string; bad?: boolean } | null;
 
@@ -18,12 +18,14 @@ export default function App() {
   const [update, setUpdate] = useState<null | (() => void)>(null);
 
   const load = useCallback(() => api.view().then(setV).catch(() => {}), []);
+  const g: Game = v?.game ?? "genshin";
+  const W = WORDS[g];
   const show = (t: Toast, ms = 4000) => { setToast(t); if (t) setTimeout(() => setToast((c) => (c === t ? null : c)), ms); };
 
   useEffect(() => {
     load();
     const un1 = listen("changed", () => { load(); setProgress(""); });
-    const un2 = listen<{ banner: string; count: number }>("progress", (e) => setProgress(`${typeName(e.payload.banner)}: ${e.payload.count} wishes`));
+    const un2 = listen<{ game: Game; banner: string; count: number }>("progress", (e) => { const w = WORDS[e.payload.game]; setProgress(`${w.title} · ${w.types[e.payload.banner] ?? e.payload.banner}: ${e.payload.count} ${w.pulls}`); });
     const tick = setInterval(load, 30000);
     check().then((u) => { if (u) setUpdate(() => async () => { await u.downloadAndInstall(); await relaunch(); }); }).catch(() => {});
     return () => { un1.then((f) => f()); un2.then((f) => f()); clearInterval(tick); };
@@ -31,8 +33,8 @@ export default function App() {
 
   const refresh = async (link?: string) => {
     try {
-      const n = await api.refresh(link);
-      show({ text: n ? `${n} new wish${n === 1 ? "" : "es"} added.` : "Up to date." });
+      const n = await api.refresh(g, link);
+      show({ text: n ? `${n} new ${n === 1 ? W.pull : W.pulls} added.` : "Up to date." });
     } catch (e) {
       show({ text: String(e), bad: true }, 8000);
     } finally {
@@ -42,8 +44,10 @@ export default function App() {
   };
 
   if (!v) return <div className="app"><TitleBar /></div>;
+  const switchGame = async (x: Game) => { setTab("character"); await api.setGame(x); load(); };
   const s = v.stats;
-  const pools = s?.pools.filter((p) => p.pool !== "beginner" || p.total > 0) ?? [];
+  // banners never pulled on (beginner, chronicled) stay hidden; the main three always show
+  const pools = s?.pools.filter((p) => ["character", "weapon", "standard"].includes(p.pool) || p.total > 0) ?? [];
   const hasWishes = !!s && s.total > 0;
 
   return (
@@ -51,35 +55,40 @@ export default function App() {
       <TitleBar />
       <header className="top">
         <div className="brand"><Star /> <span>Wishing Calculator</span></div>
+        <div className="seg games" role="tablist" aria-label="Game">
+          {(["genshin", "hsr"] as Game[]).map((x) => (
+            <button key={x} role="tab" aria-selected={g === x} className={g === x ? "on" : ""} onClick={() => switchGame(x)}>{WORDS[x].title}</button>
+          ))}
+        </div>
         {v.accounts.length > 0 && (
-          <select className="field" value={v.uid} onChange={(e) => api.select(e.target.value).then(load)} aria-label="Account">
+          <select className="field" value={v.uid} onChange={(e) => api.select(g, e.target.value).then(load)} aria-label="Account">
             {v.accounts.map((u) => <option key={u} value={u}>UID {u}</option>)}
           </select>
         )}
         <div className="grow" />
-        <StatusPill v={v} progress={progress} />
+        <StatusPill v={v} progress={progress} reopen={W.reopen} />
         <button className="btn primary" disabled={v.status.working} onClick={() => refresh()}>{v.status.working ? "Updating…" : "Refresh"}</button>
         <div className="menu-wrap">
           <button className="btn icon" aria-label="More" onClick={() => setMenu(!menu)}>⋯</button>
           {menu && (
             <div className="menu" onMouseLeave={() => setMenu(false)}>
-              <button onClick={() => { setMenu(false); setPaste(true); }}>Paste a wish link…</button>
+              <button onClick={() => { setMenu(false); setPaste(true); }}>Paste a history link…</button>
               <button onClick={async () => {
                 setMenu(false);
                 const f = await openDialog({ multiple: false, filters: [{ name: "UIGF wish history", extensions: ["json"] }] });
-                if (typeof f === "string") api.importUigf(f).then((n) => { show({ text: `Imported ${n} wishes.` }); load(); }).catch((e) => show({ text: String(e), bad: true }));
-              }}>Import from another tracker (UIGF)…</button>
+                if (typeof f === "string") api.importUigf(f).then((n) => { show({ text: `Imported ${n} new pulls.` }); load(); }).catch((e) => show({ text: String(e), bad: true }));
+              }}>Import from another tracker (UIGF/SRGF)…</button>
               <button disabled={!hasWishes} onClick={async () => {
                 setMenu(false);
-                const f = await saveDialog({ defaultPath: `wishes-${v.uid}.json`, filters: [{ name: "UIGF wish history", extensions: ["json"] }] });
-                if (f) api.exportUigf(v.uid, f).then((n) => show({ text: `Saved ${n} wishes.` })).catch((e) => show({ text: String(e), bad: true }));
+                const f = await saveDialog({ defaultPath: `${g === "hsr" ? "warps" : "wishes"}-${v.uid}.json`, filters: [{ name: "UIGF history", extensions: ["json"] }] });
+                if (f) api.exportUigf(g, v.uid, f).then((n) => show({ text: `Saved ${n} ${W.pulls}.` })).catch((e) => show({ text: String(e), bad: true }));
               }}>Export (UIGF)…</button>
               <button onClick={async () => {
                 setMenu(false);
-                const d = await openDialog({ directory: true, title: "Pick the Genshin Impact game folder" });
-                if (typeof d === "string") { await api.prefs(v.notify, v.seen_help, d); load(); refresh(); }
+                const d = await openDialog({ directory: true, title: `Pick the ${W.title} game folder` });
+                if (typeof d === "string") { await api.prefs(g, v.notify, v.seen_help, d); load(); refresh(); }
               }}>Pick game folder…</button>
-              <label className="menu-check"><input type="checkbox" checked={v.notify} onChange={(e) => api.prefs(e.target.checked, v.seen_help, v.game_dir).then(load)} /> Soft/hard pity notifications</label>
+              <label className="menu-check"><input type="checkbox" checked={v.notify} onChange={(e) => api.prefs(g, e.target.checked, v.seen_help, v.game_dir).then(load)} /> Soft/hard pity notifications</label>
             </div>
           )}
         </div>
@@ -91,7 +100,7 @@ export default function App() {
         {v.active.length > 0 && (
           <section>
             <h2>Active banners</h2>
-            <div className="banners">{v.active.map((a) => <BannerCard key={a.kind + a.name + a.image} a={a} />)}</div>
+            <div className="banners">{v.active.map((a, i) => <BannerCard key={a.kind + a.name + i} a={a} g={g} />)}</div>
           </section>
         )}
 
@@ -99,22 +108,22 @@ export default function App() {
           <>
             <section>
               <h2>Your pity</h2>
-              <div className="pity-grid">{pools.filter((p) => p.pool !== "beginner").map((p) => <PityCard key={p.pool} p={p} />)}</div>
+              <div className="pity-grid">{pools.filter((p) => p.pool !== "beginner").map((p) => <PityCard key={p.pool} p={p} g={g} />)}</div>
             </section>
             <section>
               <h2>Your luck</h2>
-              <Luck s={s!} />
+              <Luck s={s!} g={g} />
             </section>
             <section>
               <div className="sec-head">
                 <h2>5★ history</h2>
                 <div className="seg">
-                  {pools.map((p) => <button key={p.pool} className={tab === p.pool ? "on" : ""} onClick={() => setTab(p.pool)}>{POOL_NAME[p.pool]} <span className="dim">{p.fives.length}</span></button>)}
+                  {pools.map((p) => <button key={p.pool} className={tab === p.pool ? "on" : ""} onClick={() => setTab(p.pool)}>{W.pools[p.pool]} <span className="dim">{p.fives.length}</span></button>)}
                 </div>
               </div>
-              <History p={pools.find((p) => p.pool === tab) ?? pools[0]} />
+              <History p={pools.find((p) => p.pool === tab) ?? pools[0]} g={g} />
             </section>
-            <p className="foot">Odds use the community model of the game's rates (0.6% base, soft pity from wish 74, 90 max; weapon 0.7%, from 63, 80 max). The game's history updates with about an hour of delay.</p>
+            <p className="foot">{W.rates}</p>
           </>
         )}
       </main>
@@ -122,10 +131,6 @@ export default function App() {
       {toast && <div className={"toast" + (toast.bad ? " bad" : "")}>{toast.text}</div>}
     </div>
   );
-}
-
-function typeName(t: string) {
-  return { "301": "Character Event", "302": "Weapon Event", "500": "Chronicled Wish", "200": "Standard", "100": "Beginners'" }[t] ?? t;
 }
 
 function TitleBar() {
@@ -146,55 +151,58 @@ function Star({ size = 18 }: { size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden><path d="M12 2l2.9 6.3 6.9.8-5.1 4.7 1.4 6.8L12 17.2 5.9 20.6l1.4-6.8L2.2 9.1l6.9-.8z" /></svg>;
 }
 
-function StatusPill({ v, progress }: { v: View; progress: string }) {
+function StatusPill({ v, progress, reopen }: { v: View; progress: string; reopen: string }) {
   const st = v.status;
-  if (st.working) return <span className="pill busy">{progress || "Checking for new wishes…"}</span>;
-  if (st.link === "ok") return <span className="pill ok" title="New wishes are picked up automatically every few minutes.">Auto-tracking · updated {ago(st.updated)}</span>;
-  if (st.link === "expired") return <span className="pill warn" title={st.message}>Link expired — open Wish History in the game</span>;
+  const w = WORDS[v.game];
+  if (st.working) return <span className="pill busy">{progress || `Checking for new ${w.pulls}…`}</span>;
+  if (st.link === "ok") return <span className="pill ok" title={`New ${w.pulls} are picked up automatically every few minutes.`}>Auto-tracking · updated {ago(st.updated)}</span>;
+  if (st.link === "expired") return <span className="pill warn" title={st.message}>Link expired — {reopen}</span>;
   if (st.link === "error") return <span className="pill warn" title={st.message}>{st.message}</span>;
-  return <span className="pill">Waiting for the game — open Wish History once</span>;
+  return <span className="pill">Waiting for the game — {reopen} once</span>;
 }
 
-/** A picture from paimon.moe; chronicled lists mix characters and weapons, so try the other folder if one is missing. */
-function ItemPic({ id, type, rank, size = 46 }: { id: string; type?: string; rank?: number; size?: number }) {
-  const [src, setSrc] = useState(type === "Weapon" ? weaponImg(id) : charImg(id));
-  const [failed, setFailed] = useState(0);
+/** An item picture; tries a second address (Genshin's chronicled lists mix characters and weapons), then a letter. */
+function ItemPic({ icon, alt = "", name, rank, size = 46 }: { icon: string; alt?: string; name: string; rank?: number; size?: number }) {
+  const [src, setSrc] = useState(icon);
+  const [failed, setFailed] = useState(!icon);
+  useEffect(() => { setSrc(icon); setFailed(!icon); }, [icon]);
   return (
-    <div className={"pic r" + (rank ?? 5)} style={{ width: size, height: size }}>
-      {failed < 2 ? <img src={src} alt="" loading="lazy" onError={() => { setFailed((f) => f + 1); setSrc(src.includes("/weapons/") ? charImg(id) : weaponImg(id)); }} /> : <span>{id.slice(0, 1).toUpperCase()}</span>}
+    <div className={"pic r" + (rank ?? 5)} style={{ width: size, height: size }} title={name}>
+      {!failed ? <img src={src} alt="" loading="lazy" onError={() => { if (alt && src !== alt) setSrc(alt); else setFailed(true); }} /> : <span>{name.slice(0, 1).toUpperCase()}</span>}
     </div>
   );
 }
 
-function BannerCard({ a }: { a: Active }) {
-  const [art, setArt] = useState(true);
-  const fives = a.kind === "weapons" ? a.featured.slice(0, 2) : a.featured;
-  const label = a.kind === "characters" ? "Character Event" : a.kind === "weapons" ? "Weapon Event" : "Chronicled Wish";
+function BannerCard({ a, g }: { a: Active; g: Game }) {
+  const [art, setArt] = useState(!!a.art);
+  const label = WORDS[g].kinds[a.kind];
+  const title = a.name || a.featured.map((f: Item) => f.name).join(" · ");
   return (
-    <div className="bcard" style={{ ["--c" as string]: a.color || "#a78bfa" }}>
-      {art ? <img className="bart" src={bannerImg(a)} alt="" onError={() => setArt(false)} /> : <div className="bart none" />}
+    <div className={"bcard" + (a.art ? "" : " no-art")} style={{ ["--c" as string]: a.color || "#a78bfa" }}>
+      {art ? <img className="bart" src={a.art} alt="" onError={() => setArt(false)} /> : <div className="bart none" />}
       <div className="binfo">
-        <div className="kind">{label} · {a.version}</div>
-        <div className="bname">{a.name}</div>
-        <div className="ends">{until(a.ends)}</div>
+        <div className="kind">{label}{a.version ? ` · ${a.version}` : ""}</div>
+        <div className="bname">{title}</div>
+        <div className="ends">{a.ends ? until(a.ends) : ""}</div>
         <div className="feat">
-          {fives.slice(0, a.kind === "chronicled" ? 6 : 2).map((id) => <ItemPic key={id} id={id} type={a.kind === "weapons" ? "Weapon" : undefined} rank={5} size={40} />)}
-          {a.kind !== "chronicled" && a.featured_rare.slice(0, a.kind === "weapons" ? 5 : 3).map((id) => <ItemPic key={id} id={id} type={a.kind === "weapons" ? "Weapon" : undefined} rank={4} size={34} />)}
+          {a.featured.slice(0, a.kind === "chronicled" ? 6 : 3).map((it) => <ItemPic key={it.name} icon={it.icon} alt={it.alt} name={it.name} rank={5} size={a.art ? 40 : 52} />)}
+          {a.featured_rare.slice(0, 5).map((it) => <ItemPic key={it.name} icon={it.icon} alt={it.alt} name={it.name} rank={4} size={a.art ? 34 : 40} />)}
         </div>
       </div>
     </div>
   );
 }
 
-function PityCard({ p }: { p: Pool }) {
+function PityCard({ p, g }: { p: Pool; g: Game }) {
+  const W = WORDS[g];
   const fill = Math.min(1, p.pity5 / p.hard);
   const softAt = (p.soft - 1) / p.hard;
-  const zoneText = p.zone === "hard" ? "Hard pity — next wish is a 5★" : p.zone === "soft" ? "Soft pity — odds are up" : `Soft pity in ${p.soft - 1 - p.pity5} wishes`;
+  const zoneText = p.zone === "hard" ? `Hard pity — next ${W.pull} is a 5★` : p.zone === "soft" ? "Soft pity — odds are up" : `Soft pity in ${p.soft - 1 - p.pity5} ${W.pulls}`;
   const fiftyName = p.pool === "weapon" ? "75/25" : "50/50";
   return (
     <div className={"pcard zone-" + p.zone}>
       <div className="phead">
-        <div className="pname">{POOL_NAME[p.pool]}</div>
+        <div className="pname">{W.pools[p.pool]}</div>
         {p.guaranteed !== null && p.total > 0 && <span className={"chip " + (p.guaranteed ? "gold" : "")}>{p.guaranteed ? "Guaranteed featured" : fiftyName}</span>}
       </div>
       <div className="pnum"><b>{p.pity5}</b><span>/ {p.hard}</span></div>
@@ -204,7 +212,7 @@ function PityCard({ p }: { p: Pool }) {
       </div>
       <div className="zone">{zoneText}</div>
       <div className="pstats">
-        <div><span>Next wish</span><b>{pct(p.chance_next, p.chance_next < 0.1 ? 1 : 0)}</b></div>
+        <div><span>Next {W.pull}</span><b>{pct(p.chance_next, p.chance_next < 0.1 ? 1 : 0)}</b></div>
         <div><span>Within 10</span><b>{pct(p.chance10)}</b></div>
         <div><span>Avg. to go</span><b>~{Math.round(p.expected_left)}</b></div>
         <div><span>4★ pity</span><b>{p.pity4}/{p.hard4}</b></div>
@@ -225,7 +233,8 @@ function Compare({ label, mine, expected, detail, good = "high" }: { label: stri
   );
 }
 
-function Luck({ s }: { s: View["stats"] & {} }) {
+function Luck({ s, g }: { s: View["stats"] & {}; g: Game }) {
+  const W = WORDS[g];
   const fifty = s.won + s.lost;
   const w75 = s.weapon_won + s.weapon_lost;
   const nonBeginner = s.pools.filter((p) => p.pool !== "beginner").reduce((a, p) => a + p.fives.length, 0);
@@ -233,19 +242,19 @@ function Luck({ s }: { s: View["stats"] & {} }) {
     <div className="luck">
       <Compare label="50/50s won" mine={fifty ? s.won / fifty : null} expected={0.5} detail={`${s.won} won, ${s.lost} lost`} />
       <Compare label="Early 5★s" mine={nonBeginner ? s.early / nonBeginner : null} expected={s.expected_early} detail={`${s.early} of ${nonBeginner} before soft pity`} />
-      <Compare label="75/25s won (weapons)" mine={w75 ? s.weapon_won / w75 : null} expected={0.75} detail={`${s.weapon_won} won, ${s.weapon_lost} lost`} />
+      <Compare label={W.weaponFifty} mine={w75 ? s.weapon_won / w75 : null} expected={0.75} detail={`${s.weapon_won} won, ${s.weapon_lost} lost`} />
       <div className="lcard totals">
         <div><span>Average 5★ pity</span><b className={s.avg_pity && s.avg_pity <= s.expected_avg ? "good" : s.avg_pity ? "bad" : ""}>{s.avg_pity ? s.avg_pity.toFixed(1) : "—"}</b><em>expected {s.expected_avg.toFixed(1)}</em></div>
-        <div><span>Wishes</span><b>{s.total.toLocaleString()}</b><em>{s.primogems.toLocaleString()} primogems</em></div>
+        <div><span>{W.pulls[0].toUpperCase() + W.pulls.slice(1)}</span><b>{s.total.toLocaleString()}</b><em>{s.primogems.toLocaleString()} {g === "hsr" ? "Stellar Jade" : "primogems"}</em></div>
         <div><span>5★ / 4★</span><b>{s.fives} / {s.fours}</b><em>&nbsp;</em></div>
       </div>
     </div>
   );
 }
 
-function History({ p }: { p: Pool }) {
+function History({ p, g }: { p: Pool; g: Game }) {
   const list = useMemo(() => [...p.fives].reverse(), [p]);
-  if (!list.length) return <div className="empty">No 5★ on this banner yet — {p.pity5} wishes in.</div>;
+  if (!list.length) return <div className="empty">No 5★ on this banner yet — {p.pity5} {WORDS[g].pulls} in.</div>;
   return (
     <div className="hist">
       {p.pity5 > 0 && (
@@ -273,7 +282,7 @@ function HistRow({ f, p }: { f: Five; p: Pool }) {
   const label = tag && p.pool === "weapon" ? [tag[0].replace("50/50", "75/25"), tag[1]] : tag;
   return (
     <div className="hrow">
-      <ItemPic id={f.id} type={f.item_type} rank={5} size={40} />
+      <ItemPic icon={f.icon} name={f.name} rank={5} size={40} />
       <div className="hname">{f.name}<span className="dim">{f.time.slice(0, 10)}</span></div>
       <PityBar pity={f.pity} p={p} />
       <div className="tags">
@@ -285,15 +294,16 @@ function HistRow({ f, p }: { f: Five; p: Pool }) {
 }
 
 function Welcome({ v, onPaste }: { v: View; onPaste: () => void }) {
+  const W = WORDS[v.game];
   return (
     <section className="welcome">
-      <h2>Let's find your wishes</h2>
+      <h2>Let's find your {W.pulls}</h2>
       <ol>
-        <li><b>Open Genshin Impact</b> on this PC and log in.</li>
-        <li>Press <b>F3</b> (Wish), then <b>History</b> at the bottom. Any banner is fine.</li>
-        <li>Come back here. The app finds the wish link the game just saved, downloads your whole history and keeps checking for new wishes while it's open.</li>
+        <li>{W.open[0]}</li>
+        <li>{W.open[1]}</li>
+        <li>Come back here. The app finds the link the game just saved, downloads your whole history and keeps checking for new {W.pulls} while it's open.</li>
       </ol>
-      <p className="dim">The game's link works for about a day. When it runs out, open Wish History in the game again — no need to copy anything.{v.status.link === "error" && v.status.message ? ` Last try: ${v.status.message}` : ""}</p>
+      <p className="dim">The game's link works for about a day. When it runs out, {W.reopen} again — no need to copy anything.{v.status.link === "error" && v.status.message ? ` Last try: ${v.status.message}` : ""}</p>
       <div className="row">
         <button className="btn" onClick={onPaste}>Paste a wish link instead</button>
       </div>
@@ -307,12 +317,12 @@ function PasteLink({ onClose, onRun }: { onClose: () => void; onRun: (l: string)
   return (
     <div className="modal-bg" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="modal">
-        <h3>Paste a wish link</h3>
-        <p className="dim">For players on another PC or phone: a wish-history link that contains <code>authkey=</code>. It's only used to download your history and is never saved.</p>
+        <h3>Paste a history link</h3>
+        <p className="dim">For players on another PC or phone: a wish or warp history link that contains <code>authkey=</code>. It's only used to download your history and is never saved.</p>
         <input className="field" autoFocus placeholder="https://…authkey=…" value={l} onChange={(e) => setL(e.target.value.trim())} />
         <div className="row end">
           <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn primary" disabled={!ok} onClick={() => onRun(l)}>Load wishes</button>
+          <button className="btn primary" disabled={!ok} onClick={() => onRun(l)}>Load history</button>
         </div>
       </div>
     </div>

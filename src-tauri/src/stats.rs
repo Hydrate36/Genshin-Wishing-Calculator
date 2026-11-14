@@ -2,8 +2,9 @@
 //! Rates are the commonly used community model of the game's datamined rates:
 //! character/standard/chronicled 0.6% per wish, +6% per wish from wish 74, certain at 90;
 //! weapon 0.7%, +7% from wish 63, certain at 80. 4★: 5.1% (weapon 6%), sharply up from wish 9 (8), certain at 10.
-use crate::banners::{self, Banner};
-use crate::data::{pool, Wish};
+//! Star Rail is the same except Light Cones: 0.8%, +7% from warp 66, certain at 80 (4★ 6.6%).
+use crate::data::Wish;
+use crate::game::Game;
 use serde::Serialize;
 
 #[derive(Clone, Copy)]
@@ -14,16 +15,18 @@ pub struct Rates {
     pub hard: u32,
 }
 
-pub fn rates5(pool: &str) -> Rates {
-    match pool {
-        "weapon" => Rates { base: 0.007, soft: 63, step: 0.07, hard: 80 },
+pub fn rates5(g: Game, pool: &str) -> Rates {
+    match (g, pool) {
+        (Game::Genshin, "weapon") => Rates { base: 0.007, soft: 63, step: 0.07, hard: 80 },
+        (Game::Hsr, "weapon") => Rates { base: 0.008, soft: 66, step: 0.07, hard: 80 },
         _ => Rates { base: 0.006, soft: 74, step: 0.06, hard: 90 },
     }
 }
 
-pub fn rates4(pool: &str) -> Rates {
-    match pool {
-        "weapon" => Rates { base: 0.06, soft: 8, step: 0.6, hard: 10 },
+pub fn rates4(g: Game, pool: &str) -> Rates {
+    match (g, pool) {
+        (Game::Genshin, "weapon") => Rates { base: 0.06, soft: 8, step: 0.6, hard: 10 },
+        (Game::Hsr, "weapon") => Rates { base: 0.066, soft: 8, step: 0.6, hard: 10 },
         _ => Rates { base: 0.051, soft: 9, step: 0.51, hard: 10 },
     }
 }
@@ -83,6 +86,7 @@ pub fn expected_early(r: Rates) -> f64 {
 pub struct Five {
     pub name: String,
     pub id: String,
+    pub icon: String,
     pub item_type: String,
     pub time: String,
     pub pity: u32,
@@ -95,6 +99,7 @@ pub struct Five {
 pub struct Recent {
     pub name: String,
     pub id: String,
+    pub icon: String,
     pub item_type: String,
     pub rank: u8,
     pub time: String,
@@ -147,25 +152,16 @@ pub struct Summary {
     pub pools: Vec<PoolStats>,
 }
 
-fn featured_at(list: &[Banner], kind: &str, w: &Wish, server: i64) -> Option<bool> {
-    let when = banners::wish_utc(&w.time, server)?;
-    let running = banners::running_at(list, kind, when, server);
-    if running.is_empty() {
-        return None;
-    }
-    let id = banners::item_id(&w.name);
-    let five: Vec<&String> = running.iter().flat_map(|b| b.featured.iter().take(2)).collect();
-    Some(five.iter().any(|f| **f == id))
+/// Looks up whether a 5★ was featured when pulled, and an item's picture.
+pub trait Catalog {
+    fn featured(&self, g: Game, pool: &str, w: &Wish, server: i64) -> Option<bool>;
+    fn icon(&self, g: Game, w: &Wish) -> String;
 }
 
-pub fn pool_stats(pool_name: &str, wishes: &[&Wish], list: &[Banner], server: i64) -> PoolStats {
-    let r5 = rates5(pool_name);
-    let r4 = rates4(pool_name);
-    let banner_kind = match pool_name {
-        "character" => Some("characters"),
-        "weapon" => Some("weapons"),
-        _ => None,
-    };
+pub fn pool_stats(g: Game, pool_name: &str, wishes: &[&Wish], cat: &dyn Catalog, server: i64) -> PoolStats {
+    let r5 = rates5(g, pool_name);
+    let r4 = rates4(g, pool_name);
+    let has_fifty = matches!(pool_name, "character" | "weapon");
     let (mut c5, mut c4) = (0u32, 0u32);
     let mut fives: Vec<Five> = vec![];
     let mut fours = 0;
@@ -175,8 +171,8 @@ pub fn pool_stats(pool_name: &str, wishes: &[&Wish], list: &[Banner], server: i6
         c4 += 1;
         if w.rank == 5 {
             let mut result = String::new();
-            if let Some(kind) = banner_kind {
-                match featured_at(list, kind, w, server) {
+            if has_fifty {
+                match cat.featured(g, pool_name, w, server) {
                     Some(true) => result = if last_lost { "guaranteed".into() } else { "won".into() },
                     Some(false) => result = "lost".into(),
                     None => {}
@@ -187,7 +183,8 @@ pub fn pool_stats(pool_name: &str, wishes: &[&Wish], list: &[Banner], server: i6
             }
             fives.push(Five {
                 name: w.name.clone(),
-                id: banners::item_id(&w.name),
+                id: crate::banners::item_id(&w.name),
+                icon: cat.icon(g, w),
                 item_type: w.item_type.clone(),
                 time: w.time.clone(),
                 pity: c5,
@@ -213,7 +210,7 @@ pub fn pool_stats(pool_name: &str, wishes: &[&Wish], list: &[Banner], server: i6
         .rev()
         .filter(|w| w.rank >= 4)
         .take(12)
-        .map(|w| Recent { name: w.name.clone(), id: banners::item_id(&w.name), item_type: w.item_type.clone(), rank: w.rank, time: w.time.clone() })
+        .map(|w| Recent { name: w.name.clone(), id: crate::banners::item_id(&w.name), icon: cat.icon(g, w), item_type: w.item_type.clone(), rank: w.rank, time: w.time.clone() })
         .collect();
     PoolStats {
         pool: pool_name.into(),
@@ -224,7 +221,7 @@ pub fn pool_stats(pool_name: &str, wishes: &[&Wish], list: &[Banner], server: i6
         hard: r5.hard,
         hard4: r4.hard,
         zone: zone.into(),
-        guaranteed: banner_kind.map(|_| last_lost),
+        guaranteed: has_fifty.then_some(last_lost),
         chance_next: p_at(r5, c5 + 1),
         chance10: chance_within(r5, c5, 10),
         expected_left: expected_left(r5, c5),
@@ -240,13 +237,14 @@ pub fn pool_stats(pool_name: &str, wishes: &[&Wish], list: &[Banner], server: i6
     }
 }
 
-pub fn summary(all: &[Wish], list: &[Banner], uid: &str) -> Summary {
-    let server = banners::server_offset(uid);
-    let pools: Vec<PoolStats> = ["character", "weapon", "chronicled", "standard", "beginner"]
+pub fn summary(g: Game, all: &[Wish], cat: &dyn Catalog, uid: &str) -> Summary {
+    let server = crate::game::server_offset(uid);
+    let pools: Vec<PoolStats> = g
+        .pools()
         .iter()
         .map(|p| {
-            let ws: Vec<&Wish> = all.iter().filter(|w| pool(&w.gacha_type) == *p).collect();
-            pool_stats(p, &ws, list, server)
+            let ws: Vec<&Wish> = all.iter().filter(|w| g.pool(&w.gacha_type) == *p).collect();
+            pool_stats(g, p, &ws, cat, server)
         })
         .collect();
     let all_fives: Vec<(&PoolStats, &Five)> = pools.iter().filter(|p| p.pool != "beginner").flat_map(|p| p.fives.iter().map(move |f| (p, f))).collect();
@@ -264,9 +262,9 @@ pub fn summary(all: &[Wish], list: &[Banner], uid: &str) -> Summary {
         weapon_lost: wp.lost,
         early: all_fives.iter().filter(|(_, f)| f.early).count() as u32,
         // what the model expects for this mix of banners
-        expected_early: if all_fives.is_empty() { expected_early(rates5("character")) } else { all_fives.iter().map(|(p, _)| p.expected_early).sum::<f64>() / nf },
+        expected_early: if all_fives.is_empty() { expected_early(rates5(g, "character")) } else { all_fives.iter().map(|(p, _)| p.expected_early).sum::<f64>() / nf },
         avg_pity: if all_fives.is_empty() { 0.0 } else { all_fives.iter().map(|(_, f)| f.pity as f64).sum::<f64>() / nf },
-        expected_avg: if all_fives.is_empty() { expected_pity(rates5("character")) } else { all_fives.iter().map(|(p, _)| p.expected_avg).sum::<f64>() / nf },
+        expected_avg: if all_fives.is_empty() { expected_pity(rates5(g, "character")) } else { all_fives.iter().map(|(p, _)| p.expected_avg).sum::<f64>() / nf },
         pools,
     }
 }
@@ -275,27 +273,35 @@ pub fn summary(all: &[Wish], list: &[Banner], uid: &str) -> Summary {
 mod tests {
     use super::*;
     use crate::banners;
+    use crate::game::Game;
+
+    #[test]
+    fn star_rail_light_cones() {
+        let r = rates5(Game::Hsr, "weapon");
+        assert_eq!((r.hard, r.soft), (80, 66));
+        assert!(expected_pity(r) < expected_pity(rates5(Game::Hsr, "character")));
+    }
 
     #[test]
     fn model_matches_known_numbers() {
-        let c = rates5("character");
+        let c = rates5(Game::Genshin, "character");
         assert!((expected_pity(c) - 62.3).abs() < 0.5, "{}", expected_pity(c));
         assert_eq!(p_at(c, 90), 1.0);
         assert!((p_at(c, 74) - 0.066).abs() < 1e-9);
         assert!((expected_early(c) - 0.355).abs() < 0.01);
-        let w = rates5("weapon");
+        let w = rates5(Game::Genshin, "weapon");
         assert!((expected_pity(w) - 53.7).abs() < 1.5, "{}", expected_pity(w));
         assert!(chance_within(c, 89, 1) == 1.0);
         assert!(chance_within(c, 0, 10) < 0.07);
     }
 
     fn wish(id: u64, t: &str, name: &str, rank: u8, gt: &str) -> Wish {
-        Wish { id: id.to_string(), gacha_type: gt.into(), time: t.into(), name: name.into(), item_type: if rank == 5 { "Character".into() } else { "Weapon".into() }, rank }
+        Wish { id: id.to_string(), gacha_type: gt.into(), time: t.into(), name: name.into(), item_type: if rank == 5 { "Character".into() } else { "Weapon".into() }, rank, item_id: String::new() }
     }
 
     #[test]
     fn pity_and_fifty_fifty() {
-        let list = banners::parse(banners::BUNDLED).unwrap();
+        let list = banners::Banners::bundled();
         let mut ws = vec![];
         let mut id = 1000;
         // 76 wishes, the 76th is Diluc during the Mitya/Furina banners: a lost 50/50 (and in soft pity)
@@ -315,7 +321,7 @@ mod tests {
             id += 1;
             ws.push(wish(id, "2026-11-07 20:00:00", "Slingshot", 3, "301"));
         }
-        let s = summary(&ws, &list, "700000001");
+        let s = summary(Game::Genshin, &ws, &list, "700000001");
         let c = &s.pools[0];
         assert_eq!(c.fives.len(), 2);
         assert_eq!((c.fives[0].pity, c.fives[0].result.as_str(), c.fives[0].early), (76, "lost", false));

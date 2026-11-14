@@ -1,5 +1,6 @@
 //! Wishes and settings on disk: one file per account (UID) in the app's data folder.
 use serde::{Deserialize, Serialize};
+use crate::game::Game;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -13,23 +14,15 @@ pub struct Wish {
     /// "Character" or "Weapon"
     pub item_type: String,
     pub rank: u8,
+    /// the game's own item id (Star Rail sends it; used for icons)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub item_id: String,
 }
 
 impl Wish {
     /// Ids grow over time; compare them as numbers.
     pub fn order(&self) -> (usize, &str) {
         (self.id.len(), self.id.as_str())
-    }
-}
-
-/// Which pity counter a banner type uses (both character banners share one).
-pub fn pool(gacha_type: &str) -> &'static str {
-    match gacha_type {
-        "301" | "400" => "character",
-        "302" => "weapon",
-        "500" => "chronicled",
-        "100" => "beginner",
-        _ => "standard",
     }
 }
 
@@ -65,7 +58,13 @@ impl Account {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Settings {
+    /// Genshin account shown
     pub selected: String,
+    /// Star Rail account shown
+    pub selected_hsr: String,
+    /// "genshin" or "hsr": the game on screen
+    pub game: String,
+    pub hsr_dir: String,
     /// game folder picked by hand, when the log doesn't say where it is
     pub game_dir: String,
     pub notify: bool,
@@ -77,7 +76,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { selected: String::new(), game_dir: String::new(), notify: true, announced: Default::default(), seen_help: false }
+        Settings { selected: String::new(), selected_hsr: String::new(), game: "genshin".into(), hsr_dir: String::new(), game_dir: String::new(), notify: true, announced: Default::default(), seen_help: false }
     }
 }
 
@@ -97,29 +96,53 @@ fn valid_uid(uid: &str) -> bool {
     !uid.is_empty() && uid.len() <= 12 && uid.bytes().all(|b| b.is_ascii_digit())
 }
 
-pub fn load_account(uid: &str) -> Account {
+impl Settings {
+    pub fn selected(&self, g: Game) -> &str {
+        match g {
+            Game::Genshin => &self.selected,
+            Game::Hsr => &self.selected_hsr,
+        }
+    }
+    pub fn set_selected(&mut self, g: Game, uid: String) {
+        match g {
+            Game::Genshin => self.selected = uid,
+            Game::Hsr => self.selected_hsr = uid,
+        }
+    }
+    pub fn dir(&self, g: Game) -> &str {
+        match g {
+            Game::Genshin => &self.game_dir,
+            Game::Hsr => &self.hsr_dir,
+        }
+    }
+    pub fn current(&self) -> Game {
+        Game::from_key(&self.game).unwrap_or(Game::Genshin)
+    }
+}
+
+pub fn load_account(g: Game, uid: &str) -> Account {
     if !valid_uid(uid) {
         return Account::default();
     }
-    std::fs::read(root().join("accounts").join(format!("{}.json", uid)))
+    std::fs::read(root().join("accounts").join(g.account_file(uid)))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_else(|| Account { uid: uid.into(), ..Default::default() })
 }
 
-pub fn save_account(a: &Account) -> anyhow::Result<()> {
+pub fn save_account(g: Game, a: &Account) -> anyhow::Result<()> {
     if !valid_uid(&a.uid) {
         anyhow::bail!("bad UID");
     }
-    write_atomic(&root().join("accounts").join(format!("{}.json", a.uid)), &serde_json::to_vec(a)?)?;
+    write_atomic(&root().join("accounts").join(g.account_file(&a.uid)), &serde_json::to_vec(a)?)?;
     Ok(())
 }
 
-pub fn list_accounts() -> Vec<String> {
+pub fn list_accounts(g: Game) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(root().join("accounts"))
         .map(|rd| {
             rd.flatten()
-                .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".json")).map(String::from))
+                .filter_map(|e| e.file_name().to_str().and_then(|n| g.uid_from_file(n)))
                 .filter(|u| valid_uid(u))
                 .collect()
         })
@@ -140,7 +163,7 @@ pub fn save_settings(s: &Settings) {
 mod tests {
     use super::*;
     fn w(id: &str) -> Wish {
-        Wish { id: id.into(), gacha_type: "301".into(), time: String::new(), name: "x".into(), item_type: "Weapon".into(), rank: 3 }
+        Wish { id: id.into(), gacha_type: "301".into(), time: String::new(), name: "x".into(), item_type: "Weapon".into(), rank: 3, item_id: String::new() }
     }
     #[test]
     fn merge_keeps_order_and_skips_known() {

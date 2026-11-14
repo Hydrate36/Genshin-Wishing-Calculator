@@ -165,18 +165,6 @@ pub fn item_id(name: &str) -> String {
     out.trim_end_matches('_').to_string()
 }
 
-/// Hours east of UTC for the server a UID plays on.
-pub fn server_offset(uid: &str) -> i64 {
-    let u = uid.trim();
-    if u.starts_with("18") {
-        return 8;
-    }
-    match u.chars().next() {
-        Some('6') => -5,
-        Some('7') => 1,
-        _ => 8,
-    }
-}
 
 /// Banner times are written as clock times. Version starts (06:00) and phase-2 ends (14:59) are
 /// the same moment everywhere (Asia server time, UTC+8); phase changes (17:59 / 18:00) follow
@@ -205,43 +193,149 @@ pub fn running_at<'a>(list: &'a [Banner], kind: &str, when: chrono::DateTime<Utc
         .collect()
 }
 
+#[derive(Serialize, Clone, Debug)]
+pub struct Item {
+    pub name: String,
+    pub icon: String,
+    /// second picture to try (Genshin's chronicled lists mix characters and weapons)
+    pub alt: String,
+}
+
 #[derive(Serialize, Clone)]
 pub struct Active {
     pub kind: String,
+    /// banner name and artwork (Genshin only)
     pub name: String,
-    pub short_name: String,
-    pub image: u32,
+    pub art: String,
     pub color: String,
     pub version: String,
-    pub featured: Vec<String>,
-    pub featured_rare: Vec<String>,
+    pub featured: Vec<Item>,
+    pub featured_rare: Vec<Item>,
     /// unix seconds
     pub ends: i64,
 }
 
-pub fn active(list: &[Banner], server: i64) -> Vec<Active> {
-    let now = Utc::now();
-    let mut out: Vec<Active> = ["characters", "weapons", "chronicled"]
-        .iter()
-        .flat_map(|k| running_at(list, k, now, server))
-        .map(|b| Active {
-            kind: b.kind.clone(),
-            name: b.name.clone(),
-            short_name: b.short_name.clone(),
-            image: b.image,
-            color: b.color.clone(),
-            version: b.version.clone(),
-            featured: b.featured.clone(),
-            featured_rare: b.featured_rare.clone(),
-            ends: banner_utc(&b.end, server).map(|e| e.timestamp()).unwrap_or(0),
-        })
-        .collect();
-    out.sort_by_key(|a| match a.kind.as_str() {
-        "characters" => 0,
-        "weapons" => 1,
-        _ => 2,
-    });
-    out
+const PAIMON: &str = "https://paimon.moe/images";
+
+fn genshin_item(id: &str, weapon: Option<bool>) -> Item {
+    let c = format!("{}/characters/{}.png", PAIMON, id);
+    let w = format!("{}/weapons/{}.png", PAIMON, id);
+    let (icon, alt) = match weapon {
+        Some(true) => (w, String::new()),
+        Some(false) => (c, String::new()),
+        None => (c, w),
+    };
+    Item { name: id.replace('_', " "), icon, alt }
+}
+
+/// Everything known about banners for both games.
+#[derive(Clone, Default)]
+pub struct Banners {
+    pub genshin: Vec<Banner>,
+    pub hsr: crate::hsr::Data,
+}
+
+impl Banners {
+    pub fn bundled() -> Banners {
+        let mut hsr = crate::hsr::parse_banners(crate::hsr::BUNDLED_BANNERS).unwrap_or_default();
+        hsr.items = crate::hsr::parse_items_compact(crate::hsr::BUNDLED_ITEMS);
+        Banners { genshin: parse(BUNDLED).unwrap_or_default(), hsr }
+    }
+
+    pub fn active(&self, g: crate::game::Game, server: i64) -> Vec<Active> {
+        use crate::game::Game;
+        match g {
+            Game::Genshin => {
+                let now = Utc::now();
+                let mut out: Vec<Active> = ["characters", "weapons", "chronicled"]
+                    .iter()
+                    .flat_map(|k| running_at(&self.genshin, k, now, server))
+                    .map(|b| {
+                        let weapon = match b.kind.as_str() {
+                            "weapons" => Some(true),
+                            "characters" => Some(false),
+                            _ => None,
+                        };
+                        let fives: Vec<&String> = if b.kind == "weapons" { b.featured.iter().take(2).collect() } else { b.featured.iter().collect() };
+                        Active {
+                            kind: b.kind.clone(),
+                            name: b.name.clone(),
+                            art: format!("{}/banners/{} {}.png", PAIMON, b.name, b.image).replace(' ', "%20").replace('\'', "%27"),
+                            color: b.color.clone(),
+                            version: b.version.clone(),
+                            featured: fives.into_iter().map(|id| genshin_item(id, weapon)).collect(),
+                            featured_rare: if b.kind == "chronicled" { vec![] } else { b.featured_rare.iter().map(|id| genshin_item(id, weapon)).collect() },
+                            ends: banner_utc(&b.end, server).map(|e| e.timestamp()).unwrap_or(0),
+                        }
+                    })
+                    .collect();
+                out.sort_by_key(|a| match a.kind.as_str() {
+                    "characters" => 0,
+                    "weapons" => 1,
+                    _ => 2,
+                });
+                out
+            }
+            Game::Hsr => {
+                // Star Rail banners change at the server's midday; dates are server dates
+                let local = Utc::now() + Duration::hours(server);
+                let day = local.format("%Y-%m-%d").to_string();
+                self.hsr
+                    .active(&day)
+                    .into_iter()
+                    .map(|(kind, five, four, end)| {
+                        let cone = kind == "weapons";
+                        let ty = if cone { "Light Cone" } else { "Character" };
+                        let item = |n: &String| Item { name: n.clone(), icon: self.hsr.icon(n, "", ty), alt: String::new() };
+                        let ends = NaiveDateTime::parse_from_str(&format!("{} 11:59:00", end), "%Y-%m-%d %H:%M:%S")
+                            .map(|n| (n - Duration::hours(server)).and_utc().timestamp())
+                            .unwrap_or(0);
+                        Active {
+                            kind: kind.into(),
+                            name: String::new(),
+                            art: String::new(),
+                            color: if cone { "#9fb8ff".into() } else { "#c9a7ff".into() },
+                            version: String::new(),
+                            featured: five.iter().map(item).collect(),
+                            featured_rare: four.iter().map(item).collect(),
+                            ends,
+                        }
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+impl crate::stats::Catalog for Banners {
+    fn featured(&self, g: crate::game::Game, pool: &str, w: &crate::data::Wish, server: i64) -> Option<bool> {
+        use crate::game::Game;
+        match g {
+            Game::Genshin => {
+                let kind = match pool {
+                    "character" => "characters",
+                    "weapon" => "weapons",
+                    _ => return None,
+                };
+                let when = wish_utc(&w.time, server)?;
+                let running = running_at(&self.genshin, kind, when, server);
+                if running.is_empty() {
+                    return None;
+                }
+                let id = item_id(&w.name);
+                Some(running.iter().flat_map(|b| b.featured.iter().take(2)).any(|f| *f == id))
+            }
+            Game::Hsr => self.hsr.featured(pool, &w.name, &w.time),
+        }
+    }
+
+    fn icon(&self, g: crate::game::Game, w: &crate::data::Wish) -> String {
+        use crate::game::Game;
+        match g {
+            Game::Genshin => genshin_item(&item_id(&w.name), Some(w.item_type == "Weapon")).icon,
+            Game::Hsr => self.hsr.icon(&w.name, &w.item_id, &w.item_type),
+        }
+    }
 }
 
 #[cfg(test)]
