@@ -12,11 +12,19 @@ pub struct Base {
     cn: bool,
     /// authkey and friends, already URL-encoded
     query: String,
+    /// when the game saved a link to the history service itself: its host and folder
+    /// ("…/api"), so a moved service keeps working without an app update
+    own: Option<(String, String)>,
 }
 
 impl Base {
     fn url(&self, gacha_type: &str, end_id: &str, size: u32) -> String {
         let (host, path) = self.game.api(self.cn, gacha_type);
+        let (host, path) = match &self.own {
+            // same service the game uses, asking for the right list ("getGachaLog" / "getLdGachaLog")
+            Some((h, dir)) => (h.as_str(), format!("{}/{}", dir, path.rsplit('/').next().unwrap_or("getGachaLog"))),
+            None => (host, path.to_string()),
+        };
         format!("https://{}{}?{}&lang=en-us&size={}&gacha_type={}&end_id={}", host, path, self.query, size, gacha_type, end_id)
     }
 }
@@ -67,7 +75,16 @@ pub fn api_base(g: Game, url: &str) -> Option<Base> {
     if biz.is_empty() {
         keep.push(format!("game_biz={}", if g == Game::Hsr { "hkrpg_global" } else { "hk4e_global" }));
     }
-    Some(Base { game: g, cn: biz.ends_with("_cn"), query: keep.join("&") })
+    // a link straight to the history service ("https://public-operation-…/…/api/getGachaLog?…")
+    let own = url.strip_prefix("https://").and_then(|rest| {
+        let (host, path) = rest.split_once('/')?;
+        let path = path.split('?').next()?;
+        let dir = path.rsplit_once('/')?.0;
+        (host.starts_with("public-operation-") && host.ends_with(".hoyoverse.com") || host.ends_with(".mihoyo.com") && host.starts_with("public-operation-"))
+            .then(|| (host.to_string(), format!("/{}", dir)))
+            .filter(|(_, d)| d.ends_with("/api"))
+    });
+    Some(Base { game: g, cn: biz.ends_with("_cn"), query: keep.join("&"), own })
 }
 
 async fn page(base: &Base, gacha_type: &str, end_id: &str) -> Result<Vec<Wish>, Error> {
@@ -177,7 +194,15 @@ mod tests {
         assert!(cn.url("301", "0", 20).contains("public-operation-hk4e.mihoyo.com"));
         assert!(api_base(Game::Genshin, "https://example.com/?a=1").is_none());
         let h = api_base(Game::Hsr, "https://gs.hoyoverse.com/hkrpg/event/e20211215gacha-v2/index.html?authkey_ver=1&sign_type=2&authkey=Q%2F1&game_biz=hkrpg_global&region=prod_official_eur#/log").unwrap();
-        assert!(h.url("11", "0", 20).starts_with("https://public-operation-hkrpg-sg.hoyoverse.com/common/gacha_record/api/getGachaLog?"));
+        assert!(h.url("11", "0", 20).starts_with("https://public-operation-hkrpg-sg.hoyoverse.com/common/hkrpg_gacha_record/api/getGachaLog?"));
         assert!(h.url("21", "0", 20).contains("/getLdGachaLog?"));
+        assert!(h.url("11", "0", 20).contains("/common/hkrpg_gacha_record/api/getGachaLog?"));
+        // a saved link straight to the service keeps its host and folder
+        let o = api_base(Game::Hsr, "https://public-operation-hkrpg-sg.hoyoverse.com/common/some_new_record/api/getGachaLog?authkey_ver=1&authkey=Z&game_biz=hkrpg_global&gacha_type=11&end_id=0").unwrap();
+        assert!(o.url("11", "0", 20).starts_with("https://public-operation-hkrpg-sg.hoyoverse.com/common/some_new_record/api/getGachaLog?"));
+        assert!(o.url("22", "0", 20).starts_with("https://public-operation-hkrpg-sg.hoyoverse.com/common/some_new_record/api/getLdGachaLog?"));
+        // a link to some other site never sends the key there
+        let x = api_base(Game::Hsr, "https://evil.example.com/x/api/getGachaLog?authkey=Z&game_biz=hkrpg_global").unwrap();
+        assert!(x.url("11", "0", 20).starts_with("https://public-operation-hkrpg-sg.hoyoverse.com/"));
     }
 }

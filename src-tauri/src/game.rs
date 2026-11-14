@@ -76,8 +76,9 @@ impl Game {
             Game::Genshin => (if cn { "public-operation-hk4e.mihoyo.com" } else { "public-operation-hk4e-sg.hoyoverse.com" }, "/gacha_info/api/getGachaLog"),
             Game::Hsr => (
                 if cn { "public-operation-hkrpg.mihoyo.com" } else { "public-operation-hkrpg-sg.hoyoverse.com" },
-                // collaboration warps have their own record list
-                if gacha_type == "21" || gacha_type == "22" { "/common/gacha_record/api/getLdGachaLog" } else { "/common/gacha_record/api/getGachaLog" },
+                // collaboration warps have their own record list; the older /common/gacha_record/
+                // address answers with empty lists for the regular warps
+                if gacha_type == "21" || gacha_type == "22" { "/common/hkrpg_gacha_record/api/getLdGachaLog" } else { "/common/hkrpg_gacha_record/api/getGachaLog" },
             ),
         }
     }
@@ -144,7 +145,7 @@ mod tests {
         assert_eq!(Game::Hsr.pool("22"), "weapon");
         assert_eq!(Game::Hsr.pool("1"), "standard");
         assert_eq!(Game::Genshin.pool("400"), "character");
-        assert_eq!(Game::Hsr.api(false, "22").1, "/common/gacha_record/api/getLdGachaLog");
+        assert_eq!(Game::Hsr.api(false, "22").1, "/common/hkrpg_gacha_record/api/getLdGachaLog");
         assert_eq!(Game::Genshin.uid_from_file("712345678.json").as_deref(), Some("712345678"));
         assert_eq!(Game::Genshin.uid_from_file("hsr-712345678.json"), None);
         assert_eq!(Game::Hsr.uid_from_file("hsr-712345678.json").as_deref(), Some("712345678"));
