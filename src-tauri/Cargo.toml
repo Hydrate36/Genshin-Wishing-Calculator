@@ -1,8 +1,8 @@
 [package]
 name = "wish-tracker"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
-description = "Genshin Wishing Calculator — pity and wish tracker"
+description = "Genshin Wishing Calculator â€” pity and wish tracker"
 
 [lib]
 name = "wish_lib"
